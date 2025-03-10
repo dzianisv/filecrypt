@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Encrypt/Decrypt Secrets</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 1rem;
+      box-sizing: border-box;
+    }
+    h1 {
+      text-align: center;
+    }
+    .container {
+      max-width: 600px;
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+      margin: 0 auto;
+    }
+    label {
+      font-weight: bold;
+      display: block;
+      margin-bottom: 0.25rem;
+    }
+    textarea, input {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 0.5rem;
+    }
+    textarea {
+      height: 100px;
+      resize: vertical;
+    }
+    button {
+      padding: 0.75rem 1rem;
+      font-size: 1rem;
+      cursor: pointer;
+    }
+    .button-group {
+      display: flex;
+      gap: 1rem;
+      justify-content: flex-start;
+    }
+    .password-reveal {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-weight: normal;
+    }
+    .output-area {
+      background: #f0f0f0;
+    }
+  </style>
+</head>
+<body>
+  <h1>Encrypt / Decrypt Secrets</h1>
+  <div class="container">
+    <label for="inputText">Secret or Encrypted (Base64):</label>
+    <textarea id="inputText" placeholder="Enter secret or encrypted data here"></textarea>
+
+    <label for="password">Password:</label>
+    <input id="password" type="password" placeholder="Enter password to generate key"/>
+
+    <!-- Show password checkbox -->
+    <div class="password-reveal">
+      <input type="checkbox" id="showPassword" />
+      <label for="showPassword">Show Password</label>
+    </div>
+
+    <div class="button-group">
+      <button id="encryptBtn">Encrypt</button>
+      <button id="decryptBtn">Decrypt</button>
+    </div>
+
+    <label for="outputText">Result (Base64):</label>
+    <textarea id="outputText" class="output-area" readonly></textarea>
+  </div>
+
+  <script>
+    // Parameters for PBKDF2 (you can adjust iterations to be higher for stronger security)
+    const PBKDF2_ITERATIONS = 310000;
+    const SALT_LENGTH = 16;  // 128-bit salt
+    const IV_LENGTH = 12;    // 96-bit IV for AES-GCM
+    const KEY_LENGTH = 256;  // 256-bit key
+
+    // Convert a base64 string to a Uint8Array
+    function base64ToArrayBuffer(base64) {
+      const binaryString = atob(base64);
+      const len = binaryString.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      return bytes;
+    }
+
+    // Convert a Uint8Array to a base64 string
+    function arrayBufferToBase64(buffer) {
+      let binary = '';
+      const bytes = new Uint8Array(buffer);
+      for (let i = 0; i < bytes.length; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      return btoa(binary);
+    }
+
+    // Derive key using PBKDF2 (SHA-256)
+    async function deriveKey(password, salt) {
+      const enc = new TextEncoder();
+      const passKey = await window.crypto.subtle.importKey(
+        'raw',
+        enc.encode(password),
+        { name: 'PBKDF2' },
+        false,
+        ['deriveKey']
+      );
+
+      return window.crypto.subtle.deriveKey(
+        {
+          name: 'PBKDF2',
+          salt: salt,
+          iterations: PBKDF2_ITERATIONS,
+          hash: 'SHA-256'
+        },
+        passKey,
+        { name: 'AES-GCM', length: KEY_LENGTH },
+        false, // not extractable
+        ['encrypt', 'decrypt']
+      );
+    }
+
+    // Encrypt data
+    async function encryptData(plaintext, password) {
+      const enc = new TextEncoder();
+      const plaintextBytes = enc.encode(plaintext);
+
+      // Generate a random salt
+      const salt = crypto.getRandomValues(new Uint8Array(SALT_LENGTH));
+
+      // Derive key
+      const key = await deriveKey(password, salt);
+
+      // Generate a random IV
+      const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
+
+      // Encrypt using AES-GCM
+      const ciphertext = await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv: iv },
+        key,
+        plaintextBytes
+      );
+
+      // Combine salt + IV + ciphertext
+      const combined = new Uint8Array(
+        salt.length + iv.length + ciphertext.byteLength
+      );
+      combined.set(salt, 0);
+      combined.set(iv, salt.length);
+      combined.set(new Uint8Array(ciphertext), salt.length + iv.length);
+
+      // Return base64
+      return arrayBufferToBase64(combined);
+    }
+
+    // Decrypt data
+    async function decryptData(encryptedBase64, password) {
+      const combined = base64ToArrayBuffer(encryptedBase64);
+      if (combined.length < SALT_LENGTH + IV_LENGTH) {
+        throw new Error("Encrypted data is too short.");
+      }
+
+      // Extract salt, IV, and ciphertext
+      const salt = combined.slice(0, SALT_LENGTH);
+      const iv = combined.slice(SALT_LENGTH, SALT_LENGTH + IV_LENGTH);
+      const ciphertext = combined.slice(SALT_LENGTH + IV_LENGTH);
+
+      // Derive key
+      const key = await deriveKey(password, salt);
+
+      // Decrypt
+      const decrypted = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: iv },
+        key,
+        ciphertext
+      );
+
+      // Convert to UTF-8 string
+      const dec = new TextDecoder();
+      return dec.decode(decrypted);
+    }
+
+    // Handle Encryption
+    document.getElementById('encryptBtn').addEventListener('click', async () => {
+      try {
+        const inputText = document.getElementById('inputText').value;
+        const password = document.getElementById('password').value;
+        if (!inputText || !password) {
+          alert('Please provide both text and password to encrypt.');
+          return;
+        }
+        const result = await encryptData(inputText, password);
+        document.getElementById('outputText').value = result;
+      } catch (err) {
+        alert('Error encrypting: ' + err.message);
+      }
+    });
+
+    // Handle Decryption
+    document.getElementById('decryptBtn').addEventListener('click', async () => {
+      try {
+        const inputText = document.getElementById('inputText').value;
+        const password = document.getElementById('password').value;
+        if (!inputText || !password) {
+          alert('Please provide both encrypted data (base64) and password.');
+          return;
+        }
+        const result = await decryptData(inputText.trim(), password);
+        document.getElementById('outputText').value = result;
+      } catch (err) {
+        alert('Error decrypting: ' + err.message);
+      }
+    });
+
+    // Show/hide password
+    document.getElementById('showPassword').addEventListener('change', (event) => {
+      const passwordInput = document.getElementById('password');
+      passwordInput.type = event.target.checked ? 'text' : 'password';
+    });
+  </script>
+</body>
+</html>
